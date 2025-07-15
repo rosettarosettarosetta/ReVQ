@@ -1,6 +1,6 @@
 # Quantize-then-Rectify: Efﬁcient VQ-VAE Training
 
-<!-- [![paper](https://img.shields.io/badge/arXiv-Paper-green)](https://arxiv.org/abs/2412.15195) -->
+[![paper](https://img.shields.io/badge/arXiv-Paper-green)](https://arxiv.org/abs/2507.10547)
 [![Website](https://img.shields.io/badge/Project-Website-blue)](https://neur-io.github.io/ReVQ/)
 [![Demo](https://img.shields.io/badge/HF-Demo-red)](https://huggingface.co/spaces/AndyRaoTHU/ReVQ)
 [![Demo](https://img.shields.io/badge/知乎-中文解读-yellow)](https://zhuanlan.zhihu.com/p/1910111424765728444)
