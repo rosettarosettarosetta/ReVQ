@@ -5,4 +5,5 @@
 # ------------------------------------------------------------------------------
 
 from .evaluator import VQGANEvaluator
+from .revq_audio_evaluator import AudioEvaluator
 from .inception import get_inception_model

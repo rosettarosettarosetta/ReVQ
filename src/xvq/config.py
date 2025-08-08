@@ -11,7 +11,7 @@ import os
 def get_config():
     # setup config
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", type=str, default="/path/to/config.yaml")
+    parser.add_argument("--config", type=str, default="../configs/config.yaml")
     parser.add_argument("--num_epochs", type=int, default=400)
     parser.add_argument("--name", type=str, default="test")
     parser.add_argument("--lr", type=float, default=0.00005)

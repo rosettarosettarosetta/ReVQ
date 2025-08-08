@@ -73,6 +73,17 @@ class Quantizer(nn.Module):
                 self.embeddings.data[i] = torch.tensor(kmeans.cluster_centers_).to(data.device)
         nn.init.ones_(self.count)
 
+    def init_random_codebook(self):
+        """
+        Initialize codebook with random values (no data required).
+        This method provides pure random initialization without requiring training data.
+        """
+        # Reset embeddings to random values
+        nn.init.normal_(self.embeddings, mean=0.0, std=1.0)
+        # Reset count buffer
+        nn.init.ones_(self.count)
+        print(f"Initialized codebook randomly: {self.num_group} groups × {self.num_code} codes × {self.code_dim} dim")
+
     def forward(self, x):
         """
         Args:

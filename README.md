@@ -16,11 +16,18 @@
 
 ## Introduction
 
-We conduct image reconstruction experiments on the ImageNet dataset, and the quantitative comparison is shown below:
+We conduct audio reconstruction experiments using ReVQ for audio quantization, demonstrating efficient training and high-quality audio reconstruction:
 
 ![res](assets/res.png)
 
-Our ReVQ method starts from a pre-trained [DC-AE](https://github.com/mit-han-lab/efficientvit/blob/master/applications/dc_ae/README.md) model and transforms the continuous VAE model into a VQ-VAE model. 
+Our ReVQ method starts from a pre-trained audio VAE model and transforms the continuous VAE model into a VQ-VAE model for audio quantization. 
+The model processes raw audio through the following pipeline:
+1. **AudioPreprocessor**: Converts raw audio to mel spectrograms
+2. **VAE Encoder**: Encodes mel spectrograms to latent space
+3. **ReVQ Quantizer**: Quantizes latents using grouped vector quantization (256 groups × 256 codes)
+4. **Decoder**: Reconstructs latents from quantized representations
+5. **VAE Decoder**: Converts back to mel spectrograms and audio
+
 Compared with training a VQ-VAE model from scratch, the required training time is greatly reduced, as shown below:
 
 ![time](assets/time.png)
@@ -75,106 +82,163 @@ decoder.load_state_dict(checkpoint["decoder"])
 
 #### Perform inference
 
-After loading the model, you can perform inference (reconstruction):
+After loading the model, you can perform inference (audio reconstruction):
 
 ```python
-from diffusers import AutoencoderDC
 from xvq.models.revq import ReVQ
-from xvq.dataset import load_preprocessor
+from xvq.dataset import load_frozen_vae, AudioPreprocessor
+import torch
+import torchaudio
 
 # load the dataset and pre-trained models
-dataset = ... # the input should be normalized to [-1, 1]
-data = dataset[...] # size: (BS, C, H, W)
-vae = AutoencoderDC.from_pretrained("mit-han-lab/dc-ae-f32c32-sana-1.1-diffusers")
-preprocessor = load_preprocessor(device=data.device, is_eval=True,
-                                 ckpt_path="ckpt/preprocessor.pth")
-model = ReVQ.from_pretrained("AndyRaoTHU/revq-512T")
+# Load raw audio (should be normalized appropriately)
+audio_file = "path/to/audio.wav"
+raw_audio, sr = torchaudio.load(audio_file)
+raw_audio = raw_audio.unsqueeze(0)  # Add batch dimension: (1, channels, time)
 
-# reconstruct the input
+# Initialize components
+audio_preprocessor = AudioPreprocessor(
+    sample_rate=22050,
+    n_fft=1024,
+    hop_length=256,
+    n_mels=80,
+    target_length=256
+).to(device)
+
+vae_encoder, vae_decoder = load_frozen_vae(device=device, config=config.model, if_decoder=True)
+model = ReVQ.from_pretrained("AndyRaoTHU/revq-audio")  # Replace with actual model path
+
+# Audio reconstruction pipeline
 with torch.no_grad():
-    lat = vae.encode(data).latent.contiguous()
-    lat = preprocessor(lat)
-    lat = model.quantize(lat)
-    lat = model.decode(lat).contiguous()
-    lat = preprocessor.inverse(lat)
-    recon = vae.decode(lat).sample
+    # 1. Audio preprocessing: raw audio -> mel spectrogram
+    mel_spec = audio_preprocessor(raw_audio)
+    
+    # 2. VAE encoding: mel spectrogram -> latent
+    latent = vae_encoder(mel_spec)
+    
+    # 3. ReVQ quantization with shuffle/unshuffle
+    latent_shuffle = model.viewer.shuffle(latent)
+    quantized_shuffle = model.quantize(latent_shuffle)
+    quantized = model.viewer.unshuffle(quantized_shuffle)
+    
+    # 4. Decode: quantized latent -> reconstructed latent
+    reconstructed_latent = model.decode(quantized)
+    
+    # 5. VAE decoding: latent -> mel spectrogram -> audio
+    reconstructed_mel = vae_decoder(reconstructed_latent)
+    # Note: Additional steps needed to convert mel back to audio if required
 ```
 
 ## Preparation for Training
 ### Dataset 
-Please download the ImageNet dataset from the official website and place it in the following format:
+Please prepare your audio dataset in the following format:
 ```
 data
-└───imagenet
+└───audio_dataset
     └───train
-        └───n01440764
-            └───n01440764_10026.JPEG
-            └───n01440764_10027.JPEG
-            ...
-        └───n01443537
-            └───n01443537_1000.JPEG
-            ...
+        └───audio_file_001.wav
+        └───audio_file_002.wav
+        ...
     └───val
-        └───n01440764
-            └───ILSVRC2012_val_00000293.JPEG
-            ...
+        └───audio_file_val_001.wav
+        └───audio_file_val_002.wav
+        ...
 ```
 ### Data Processing Guide
-**Step 1: Download Pre-trained DC-AE Model**
-Execute the following command to download the pre-trained Deep Convolutional Autoencoder (DC-AE) model:
+**Step 1: Download Pre-trained Audio VAE Model**
+Ensure you have a pre-trained audio VAE model for latent space conversion:
 
 ```bash
-HF_ENDPOINT="https://hf-mirror.com/" huggingface-cli download \
-  --resume-download mit-han-lab/dc-ae-f32c32-sana-1.1-diffusers \
-  --local-dir ./ckpt/dc_ae
+# Place your pre-trained audio VAE model in:
+# ./ckpt/audio_vae/
 ```
 
-**Step 2: Convert ImageNet Dataset to Latent Space**
-Run the conversion script to transform ImageNet images into 2048-dimensional(32×8×8) latent vectors(Enter the paths for both the dc_ae model and ImageNet dataset):
+**Step 2: Convert Audio Dataset to Latent Space**
+Run the conversion script to transform audio files into latent vectors using AudioPreprocessor + VAE encoder:
 
 ```bash
-python scripts/convert_imagenet.py 
+python scripts/convert_audio_dataset.py 
 ```
 Output will be saved in TAR format.
 
-**Step 3: Package Training and Validation Sets**
-Process the latent vectors into PyTorch format(Enter the path for the output of Step 2):
-```bash
-python scripts/save_imagenet.py 
-```
-Provide separate TAR files for training and validation sets to generate:
-- [`imagenet_train.pth`](imagenet_train.pth)
-- [`imagenet_val.pth`](imagenet_val.pth) 
-
-**Step 4: Create Subset for Codebook Initialization**
-Generate a subset for quantizer initialization(Enter the path for [`imagenet_train.pth`](imagenet_train.pth)):
+**Step 3: Generate Codebook Initialization Data (Optimized Process)**
+Create subset data for quantizer initialization directly from WebDataset (combines previous steps):
 ```bash
 python scripts/convert_subset_dataset.py
 ```
-The output [`subset.pth`](subset.pth) will be used for initializing the quantizer's codebook.
 
-## Training
-For the 512-token model described in this paper, execute the following training command:
+This script will:
+- Load ImageNet data directly from WebDataset TAR files
+- Generate a random subset for codebook initialization  
+- Apply preprocessing to prepare the data
+- Save the result as [`subset.pth`](subset.pth)
 
-```bash
-config_path=configs/512T_NC=16384.yaml
-python scripts/train.py --config $config_path --name 512T --world_size 1 --batch_size 256
+**Configuration**: Edit the paths in `convert_subset_dataset.py`:
+```python
+webdataset_shards_path = "/path/to/imagenet_train_{000000..000320}.tar"
+preprocessor_ckpt_path = "../ckpt/preprocessor.pth"  
+output_subset_path = "/path/to/save/subset.pth"
 ```
 
+**Optional**: Set `save_full_imagenet = True` to also save the complete dataset as `imagenet_train.pth` (for debugging or other uses).
+
+**Legacy Process**: If you prefer the two-step process:
+```bash
+# Step 3a: Package Training and Validation Sets
+python scripts/save_imagenet.py 
+# Step 3b: Create Subset for Codebook Initialization  
+python scripts/convert_subset_dataset.py
+```
+
+## Training
+For the ReVQ audio model with the configuration described in this implementation, execute the following training command:
+
+```bash
+config_path=configs/256T_NC=65536.yaml  # 256 groups × 256 codes = 65536 total codes
+python scripts/train.py --config $config_path --name audio_revq --world_size 1 --batch_size 32
+```
+
+Key configuration parameters for audio ReVQ:
+- **Groups**: 256 (ReVQ groupwise quantization)
+- **Codes per group**: 256  
+- **Total codebook size**: 65536
+- **Audio preprocessing**: 22050 Hz, 80 mel filters, 1024 FFT, 256 hop length
+
 ## Evaluation
-To evaluate the model, you can use the following code:
+To evaluate the audio ReVQ model, you can use the following code:
 
 ```bash
 # Create directory structure
-mkdir -p ./outputs/512T_NC=16384
+mkdir -p ./outputs/audio_revq
 
 # Place downloaded files
-cp /path/to/512T_NC=16384.pth ./outputs/512T_NC=16384/
-cp /path/to/512T_NC=16384.yaml ./outputs/512T_NC=16384/
+cp /path/to/ckpt.pth ./outputs/audio_revq/
+cp /path/to/config.yaml ./outputs/audio_revq/
 
-name=512T_NC=16384
-python scripts/eval.py --name $name --config outputs/$name/$name.yaml
+name=audio_revq
+python scripts/eval.py --name $name --config outputs/$name/config.yaml
 ```
+
+The evaluation will output comprehensive audio metrics:
+- **Time domain**: MSE, MAE, RMSE, SNR
+- **Frequency domain**: Spectral MSE/MAE  
+- **Mel domain**: Mel spectrogram MSE/MAE
+- **Codebook statistics**: Usage rate, entropy, group-wise statistics
+
+## Audio-Specific Features
+
+### AudioPreprocessor
+The model uses a specialized AudioPreprocessor that:
+- Converts raw audio to mel spectrograms
+- Handles variable-length audio inputs
+- Normalizes spectrograms for VAE compatibility
+- Supports configurable sample rates and mel filter banks
+
+### ReVQ for Audio
+- **Grouped Quantization**: 256 groups with 256 codes each
+- **Shuffle/Unshuffle Operations**: Breaks spatial correlations in audio latents
+- **Efficient Training**: Leverages pre-trained VAE components
+- **High Fidelity**: Maintains audio quality through multi-domain evaluation
 
 ## Visualization
 The visualization pipeline requires the pretrained model checkpoint and its corresponding YAML configuration file. Execute with:

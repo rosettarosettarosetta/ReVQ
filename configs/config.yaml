@@ -1,0 +1,74 @@
+name: 256T_NC=65536
+log_path: 
+world_size: 1
+backend: "nccl"
+init_method: "tcp://localhost:23456"
+seed: 42
+log_interval : 1000
+
+data:
+  data_train_path: 
+  data_val_path:
+  sample_rate: 
+  n_fft :
+  n_mels :
+  target_length :
+  input_size :
+  channels :
+  win_size :
+  hop_length :
+  acoustic_dim :
+  num_workers : 8
+
+
+model:
+  audio_preprocessor:
+    sample_rate: 
+    n_fft: 
+    hop_length: 
+    n_mels:
+    target_length:
+
+  vae_encoder_path: 
+  vae_decoder_path :
+  decoder_path :
+  quantizer_path :
+  freeze_decoder: false  
+  decoder_retrain: false
+
+  quantizer:
+    TYPE: vq
+    num_code: 65536
+    num_group: 256
+    tokens_per_data: 256
+  
+  decoder:
+  
+  vae_decoder:
+    #需要decoder 部分的参数
+    # TYPE: dc_ae
+    # in_channels: 32
+    # latent_channels: 32
+    # attention_head_dim: 32
+    # block_type: [EfficientViTBlock]
+    # block_out_channels: [512]
+    # layers_per_block: [4]
+    # qkv_multiscales: [[5]]
+    # norm_type: rms_norm
+    # act_fn: silu
+    # upsample_block_type: interpolate
+  
+  vae_encoder:
+    TYPE: vae_encoder  # 或者根据你的encoder类型设置
+    # 在这里添加encoder需要的参数
+    # input_channels: 3
+    # latent_dim: 256
+    # 等等...
+
+train:
+  batch_size: 
+  world_size: ${world_size}
+  num_epochs: 100
+  lr: 0.01
+  visualize_interval: 1
+  eval_interval: 1  # 每隔多少个epoch进行一次验证 

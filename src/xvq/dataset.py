@@ -7,14 +7,16 @@
 import webdataset as wds
 import math
 from tqdm import tqdm
-
 import torch
-from torch.utils.data import default_collate
 import torch.nn as nn
+import torch.nn.functional as F
+import torchaudio
+import torchaudio.transforms
 import os
 from torchvision import datasets, transforms
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader ,default_collate
 from diffusers import AutoencoderDC
+from xvq.models.vae import vae_encoder, vae_decoder
 
 def compute_stats(num_samples, num_gpus, batch_size_per_gpu, num_workers_per_gpu):
     global_batch_size = batch_size_per_gpu * num_gpus
@@ -156,61 +158,92 @@ def load_data_and_stats(device, loader, downsample_ratio: int = 2):
         var=current_var,
     )
 
-class Preprocessor(nn.Module):
-    def __init__(self, input_data_size):
-        super(Preprocessor, self).__init__()
-        self.input_data_size = input_data_size
-        C, H, W = input_data_size
-        self.data_dim = C * H * W
-        self.register_buffer("mean", torch.empty(self.data_dim))
-        self.register_buffer("std", torch.empty(self.data_dim))
+class AudioPreprocessor(nn.Module):
+    def __init__(self, 
+                 sample_rate=22050,
+                 n_fft=1024,
+                 hop_length=256,
+                 n_mels=80,
+                 target_length=512):
+        super().__init__()
+        self.sample_rate = sample_rate
+        self.target_length = target_length
+        
+        self.mel_transform = torchaudio.transforms.MelSpectrogram(
+            sample_rate=sample_rate,
+            n_fft=n_fft,
+            hop_length=hop_length,
+            n_mels=n_mels,
+            power=2.0
+        )
+        
+        self.feature_norm = nn.LayerNorm(n_mels)
+        
+        self.length_adapter = nn.Linear(n_mels, n_mels)
+        
+        self.data_dim = n_mels * target_length
+        
+    def forward(self, waveform):
+        """
+        Args:
+            waveform: [B, channels, samples] 原始音频波形
+        Returns:
+            features: [B, n_mels, target_length] 标准化的mel频谱图
+        """
+        if waveform.size(1) > 1:
+            waveform = waveform.mean(dim=1, keepdim=True)
+        
+        mel_spec = self.mel_transform(waveform.squeeze(1))  # [B, n_mels, time]
+        
+        mel_spec = torchaudio.transforms.AmplitudeToDB()(mel_spec)
+        
+        current_length = mel_spec.size(-1)
+        if current_length != self.target_length:
+            mel_spec = F.interpolate(
+                mel_spec.unsqueeze(1), 
+                size=(mel_spec.size(1), self.target_length),
+                mode='bilinear',
+                align_corners=False
+            ).squeeze(1)
+        
+        mel_spec = mel_spec.transpose(1, 2)  # [B, time, n_mels]
+        mel_spec = self.feature_norm(mel_spec)
+        mel_spec = mel_spec.transpose(1, 2)  # [B, n_mels, time]
+        
+        return mel_spec
     
-    def prepare(self, mean, var):
-        self.mean = mean.to(self.mean.device)
-        self.std = torch.sqrt(var.to(self.std.device))
-
-    def forward(self, x):
-        # normalize: (B, C, H, W) -> (B, C, H, W)
-        B, C, H, W = x.size()
-        x = x.view(B, self.data_dim) # (B, C*H*W)
-        x = (x - self.mean) / self.std
-        x = x.view(B, C, H, W).detach()
-        return x
-
-    def inverse(self, x):
-        # un-normalize: (B, C, H, W) -> (B, C, H, W)
-        B = x.size(0)
-        C, H, W = self.input_data_size
-        x = x.view(B, self.data_dim) # (B, C*H*W)
-        x = x * self.std + self.mean
-        x = x.view(B, C, H, W)
-        return x
+    def inverse(self, features):
+        return features  
     
-def load_preprocessor(device, is_eval: bool = True,
-    ckpt_path: str = "../ckpt/preprocessor.pth"):
-    preprocessor = Preprocessor(
-        input_data_size=[32, 8, 8]
-    ).to(device)
-    preprocessor.load_state_dict(
-        torch.load(ckpt_path, map_location=device, weights_only=True)
-    )
-    if is_eval:
-        preprocessor.eval()
-    return preprocessor
 
-def load_frozen_vae(device, config, is_eval: bool = True):
-    vae = AutoencoderDC.from_pretrained(config.vae_path, torch_dtype=torch.float32).to(device)
-    if is_eval:
-        vae.eval()
-    def vae_encode(x):
-        with torch.no_grad():
-            return vae.encode(x).latent
-    def vae_decode(x):
-        with torch.no_grad():
-            return vae.decode(x).sample
-    return vae_encode, vae_decode
+
+def load_frozen_vae(device, config, is_eval: bool = True, if_decoder: bool = True):
+
+    if if_decoder:
+        decoder_model = vae_decoder(config.vae_decoder)
+        checkpoint = torch.load(config.vae_decoder_path, map_location=device)
+        decoder_model.load_state_dict(checkpoint['model'])
+
+        for param in decoder_model.parameters():
+            param.requires_grad = False
+        decoder_model.eval()
+        decoder_model = decoder_model.to(device)
+
+    else :
+        decoder_model = None
     
-def get_imagenet_loader(
+    encoder_model = vae_encoder(config.vae_encoder)
+    checkpoint = torch.load(config.vae_encoder_path, map_location=device)
+    encoder_model.load_state_dict(checkpoint['model'])  
+
+    for param in encoder_model.parameters():
+        param.requires_grad = False
+    encoder_model.eval()
+    encoder_model = encoder_model.to(device)  
+
+    return encoder_model, decoder_model
+    
+def data_loader(
     root_dir,
     split='train',
     batch_size=64,
@@ -224,14 +257,14 @@ def get_imagenet_loader(
 
     if split == 'train':
         transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(256),
+            transforms.Resize(image_size),
+            transforms.CenterCrop(image_size),
             transforms.ToTensor(),
         ])
     else:
         transform = transforms.Compose([
-            transforms.Resize(256),
-            transforms.CenterCrop(256),
+            transforms.Resize(image_size),
+            transforms.CenterCrop(image_size),
             transforms.ToTensor(),
         ])
 
